@@ -27,7 +27,6 @@ RUN mkdir ./data
 # ⭐ Main Image
 ############################################
 FROM $BASE_IMAGE AS release
-USER node
 WORKDIR /app
 
 LABEL org.opencontainers.image.source="https://github.com/louislam/uptime-kuma"
@@ -43,11 +42,19 @@ ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 CMD ["node", "server/server.js"]
 
 ############################################
+# Rootless Image
+############################################
+FROM release AS rootless
+USER node
+
+############################################
 # Mark as Nightly
 ############################################
 FROM release AS nightly
-USER node
 RUN npm run mark-as-nightly
+
+FROM nightly AS nightly-rootless
+USER node
 
 ############################################
 # Build an image for testing pr

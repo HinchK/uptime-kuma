@@ -1,12 +1,11 @@
-const https = require("https");
 const dayjs = require("dayjs");
 const axios = require("axios");
 const { Prometheus } = require("../prometheus");
 const { log, UP, DOWN, PENDING, MAINTENANCE, flipStatus, MAX_INTERVAL_SECOND, MIN_INTERVAL_SECOND,
-    SQL_DATETIME_FORMAT
+    SQL_DATETIME_FORMAT, evaluateJsonQuery
 } = require("../../src/util");
-const { tcping, ping, checkCertificate, checkStatusCode, getTotalClientInRoom, setting, mssqlQuery, postgresQuery, mysqlQuery, mqttAsync, setSetting, httpNtlm, radius, grpcQuery,
-    redisPingAsync, mongodbPing, kafkaProducerAsync, getOidcTokenClientCredentials, axiosAbortSignal
+const { tcping, ping, checkCertificate, checkStatusCode, getTotalClientInRoom, setting, mssqlQuery, postgresQuery, mysqlQuery, setSetting, httpNtlm, radius, grpcQuery,
+    redisPingAsync, kafkaProducerAsync, getOidcTokenClientCredentials, rootCertificatesFingerprints, axiosAbortSignal
 } = require("../util-server");
 const { R } = require("redbean-node");
 const { BeanModel } = require("redbean-node/dist/bean-model");
@@ -16,12 +15,17 @@ const { demoMode } = require("../config");
 const version = require("../../package.json").version;
 const apicache = require("../modules/apicache");
 const { UptimeKumaServer } = require("../uptime-kuma-server");
-const { CacheableDnsHttpAgent } = require("../cacheable-dns-http-agent");
 const { DockerHost } = require("../docker");
 const Gamedig = require("gamedig");
-const jsonata = require("jsonata");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 const { UptimeCalculator } = require("../uptime-calculator");
+const { CookieJar } = require("tough-cookie");
+const { HttpsCookieAgent } = require("http-cookie-agent/http");
+const https = require("https");
+const http = require("http");
+
+const rootCertificates = rootCertificatesFingerprints();
 
 /**
  * status:
@@ -38,7 +42,7 @@ class Monitor extends BeanModel {
      * @param {boolean} showTags Include tags in JSON
      * @param {boolean} certExpiry Include certificate expiry info in
      * JSON
-     * @returns {object} Object ready to parse
+     * @returns {Promise<object>} Object ready to parse
      */
     async toPublicJSON(showTags = false, certExpiry = false) {
         let obj = {
@@ -67,23 +71,12 @@ class Monitor extends BeanModel {
 
     /**
      * Return an object that ready to parse to JSON
+     * @param {object} preloadData to prevent n+1 problems, we query the data in a batch outside of this function
      * @param {boolean} includeSensitiveData Include sensitive data in
      * JSON
      * @returns {object} Object ready to parse
      */
-    async toJSON(includeSensitiveData = true) {
-
-        let notificationIDList = {};
-
-        let list = await R.find("monitor_notification", " monitor_id = ? ", [
-            this.id,
-        ]);
-
-        for (let bean of list) {
-            notificationIDList[bean.notification_id] = true;
-        }
-
-        const tags = await this.getTags();
+    toJSON(preloadData = {}, includeSensitiveData = true) {
 
         let screenshot = null;
 
@@ -91,21 +84,25 @@ class Monitor extends BeanModel {
             screenshot = "/screenshots/" + jwt.sign(this.id, UptimeKumaServer.getInstance().jwtSecret) + ".png";
         }
 
+        const path = preloadData.paths.get(this.id) || [];
+        const pathName = path.join(" / ");
+
         let data = {
             id: this.id,
             name: this.name,
             description: this.description,
-            pathName: await this.getPathName(),
+            path,
+            pathName,
             parent: this.parent,
-            childrenIDs: await Monitor.getAllChildrenIDs(this.id),
+            childrenIDs: preloadData.childrenIDs.get(this.id) || [],
             url: this.url,
             method: this.method,
             hostname: this.hostname,
             port: this.port,
             maxretries: this.maxretries,
             weight: this.weight,
-            active: await this.isActive(),
-            forceInactive: !await Monitor.isParentActive(this.id),
+            active: preloadData.activeStatus.get(this.id),
+            forceInactive: preloadData.forceInactive.get(this.id),
             type: this.type,
             timeout: this.timeout,
             interval: this.interval,
@@ -125,11 +122,12 @@ class Monitor extends BeanModel {
             docker_container: this.docker_container,
             docker_host: this.docker_host,
             proxyId: this.proxy_id,
-            notificationIDList,
-            tags: tags,
-            maintenance: await Monitor.isUnderMaintenance(this.id),
+            notificationIDList: preloadData.notifications.get(this.id) || {},
+            tags: preloadData.tags.get(this.id) || [],
+            maintenance: preloadData.maintenanceStatus.get(this.id),
             mqttTopic: this.mqttTopic,
             mqttSuccessMessage: this.mqttSuccessMessage,
+            mqttCheckType: this.mqttCheckType,
             databaseQuery: this.databaseQuery,
             authMethod: this.authMethod,
             grpcUrl: this.grpcUrl,
@@ -146,10 +144,17 @@ class Monitor extends BeanModel {
             expectedValue: this.expectedValue,
             kafkaProducerTopic: this.kafkaProducerTopic,
             kafkaProducerBrokers: JSON.parse(this.kafkaProducerBrokers),
-            kafkaProducerSsl: this.kafkaProducerSsl === "1" && true || false,
-            kafkaProducerAllowAutoTopicCreation: this.kafkaProducerAllowAutoTopicCreation === "1" && true || false,
+            kafkaProducerSsl: this.getKafkaProducerSsl(),
+            kafkaProducerAllowAutoTopicCreation: this.getKafkaProducerAllowAutoTopicCreation(),
             kafkaProducerMessage: this.kafkaProducerMessage,
             screenshot,
+            cacheBust: this.getCacheBust(),
+            remote_browser: this.remote_browser,
+            snmpOid: this.snmpOid,
+            jsonPathOperator: this.jsonPathOperator,
+            snmpVersion: this.snmpVersion,
+            rabbitmqNodes: JSON.parse(this.rabbitmqNodes),
+            conditions: JSON.parse(this.conditions),
         };
 
         if (includeSensitiveData) {
@@ -179,21 +184,13 @@ class Monitor extends BeanModel {
                 tlsCert: this.tlsCert,
                 tlsKey: this.tlsKey,
                 kafkaProducerSaslOptions: JSON.parse(this.kafkaProducerSaslOptions),
+                rabbitmqUsername: this.rabbitmqUsername,
+                rabbitmqPassword: this.rabbitmqPassword,
             };
         }
 
         data.includeSensitiveData = includeSensitiveData;
         return data;
-    }
-
-    /**
-     * Checks if the monitor is active based on itself and its parents
-     * @returns {Promise<boolean>} Is the monitor active?
-     */
-    async isActive() {
-        const parentActive = await Monitor.isParentActive(this.id);
-
-        return (this.active === 1) && parentActive;
     }
 
     /**
@@ -234,12 +231,12 @@ class Monitor extends BeanModel {
     /**
      * Encode user and password to Base64 encoding
      * for HTTP "basic" auth, as per RFC-7617
-     * @param {string} user Username to encode
-     * @param {string} pass Password to encode
-     * @returns {string} Encoded username:password
+     * @param {string|null} user - The username (nullable if not changed by a user)
+     * @param {string|null} pass - The password (nullable if not changed by a user)
+     * @returns {string} Encoded Base64 string
      */
     encodeBase64(user, pass) {
-        return Buffer.from(user + ":" + pass).toString("base64");
+        return Buffer.from(`${user || ""}:${pass || ""}`).toString("base64");
     }
 
     /**
@@ -283,6 +280,14 @@ class Monitor extends BeanModel {
     }
 
     /**
+     * Parse to boolean
+     * @returns {boolean} if cachebusting is enabled
+     */
+    getCacheBust() {
+        return Boolean(this.cacheBust);
+    }
+
+    /**
      * Get accepted status codes
      * @returns {object} Accepted status codes
      */
@@ -299,11 +304,27 @@ class Monitor extends BeanModel {
     }
 
     /**
+     * Parse to boolean
+     * @returns {boolean} Kafka Producer Ssl enabled?
+     */
+    getKafkaProducerSsl() {
+        return Boolean(this.kafkaProducerSsl);
+    }
+
+    /**
+     * Parse to boolean
+     * @returns {boolean} Kafka Producer Allow Auto Topic Creation Enabled?
+     */
+    getKafkaProducerAllowAutoTopicCreation() {
+        return Boolean(this.kafkaProducerAllowAutoTopicCreation);
+    }
+
+    /**
      * Start monitor
      * @param {Server} io Socket server instance
-     * @returns {void}
+     * @returns {Promise<void>}
      */
-    start(io) {
+    async start(io) {
         let previousBeat = null;
         let retries = 0;
 
@@ -332,6 +353,9 @@ class Monitor extends BeanModel {
                 previousBeat = await R.findOne("heartbeat", " monitor_id = ? ORDER BY time DESC", [
                     this.id,
                 ]);
+                if (previousBeat) {
+                    retries = previousBeat.retries;
+                }
             }
 
             const isFirstBeat = !previousBeat;
@@ -344,6 +368,12 @@ class Monitor extends BeanModel {
 
             if (this.isUpsideDown()) {
                 bean.status = flipStatus(bean.status);
+            }
+
+            // Runtime patch timeout if it is 0
+            // See https://github.com/louislam/uptime-kuma/pull/3961#issuecomment-1804149144
+            if (!this.timeout || this.timeout <= 0) {
+                this.timeout = this.interval * 1000 * 0.8;
             }
 
             try {
@@ -401,9 +431,7 @@ class Monitor extends BeanModel {
                     if (this.auth_method === "oauth2-cc") {
                         try {
                             if (this.oauthAccessToken === undefined || new Date(this.oauthAccessToken.expires_at * 1000) <= new Date()) {
-                                log.debug("monitor", `[${this.name}] The oauth access-token undefined or expired. Requesting a new one`);
-                                this.oauthAccessToken = await getOidcTokenClientCredentials(this.oauth_token_url, this.oauth_client_id, this.oauth_client_secret, this.oauth_scopes, this.oauth_auth_method);
-                                log.debug("monitor", `[${this.name}] Obtained oauth access-token. Expires at ${new Date(this.oauthAccessToken.expires_at * 1000)}`);
+                                this.oauthAccessToken = await this.makeOidcTokenClientCredentialsRequest();
                             }
                             oauth2AuthHeader = {
                                 "Authorization": this.oauthAccessToken.token_type + " " + this.oauthAccessToken.access_token,
@@ -416,6 +444,7 @@ class Monitor extends BeanModel {
                     const httpsAgentOptions = {
                         maxCachedSessions: 0, // Use Custom agent to disable session reuse (https://github.com/nodejs/node/issues/3940)
                         rejectUnauthorized: !this.getIgnoreTls(),
+                        secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
                     };
 
                     log.debug("monitor", `[${this.name}] Prepare Options for axios`);
@@ -456,11 +485,19 @@ class Monitor extends BeanModel {
                         validateStatus: (status) => {
                             return checkStatusCode(status, this.getAcceptedStatuscodes());
                         },
-                        signal: axiosAbortSignal(this.timeout * 1000),
+                        signal: axiosAbortSignal((this.timeout + 10) * 1000),
                     };
 
                     if (bodyValue) {
                         options.data = bodyValue;
+                    }
+
+                    if (this.cacheBust) {
+                        const randomFloatString = Math.random().toString(36);
+                        const cacheBust = randomFloatString.substring(2);
+                        options.params = {
+                            uptime_kuma_cachebuster: cacheBust,
+                        };
                     }
 
                     if (this.proxy_id) {
@@ -478,7 +515,12 @@ class Monitor extends BeanModel {
                     }
 
                     if (!options.httpsAgent) {
-                        options.httpsAgent = new https.Agent(httpsAgentOptions);
+                        let jar = new CookieJar();
+                        let httpsCookieAgentOptions = {
+                            ...httpsAgentOptions,
+                            cookies: { jar }
+                        };
+                        options.httpsAgent = new HttpsCookieAgent(httpsCookieAgentOptions);
                     }
 
                     if (this.auth_method === "mtls") {
@@ -493,6 +535,18 @@ class Monitor extends BeanModel {
                         }
                     }
 
+                    let tlsInfo = {};
+                    // Store tlsInfo when secureConnect event is emitted
+                    // The keylog event listener is a workaround to access the tlsSocket
+                    options.httpsAgent.once("keylog", async (line, tlsSocket) => {
+                        tlsSocket.once("secureConnect", async () => {
+                            tlsInfo = checkCertificate(tlsSocket);
+                            tlsInfo.valid = tlsSocket.authorized || false;
+
+                            await this.handleTlsInfo(tlsInfo);
+                        });
+                    });
+
                     log.debug("monitor", `[${this.name}] Axios Options: ${JSON.stringify(options)}`);
                     log.debug("monitor", `[${this.name}] Axios Request`);
 
@@ -502,29 +556,17 @@ class Monitor extends BeanModel {
                     bean.msg = `${res.status} - ${res.statusText}`;
                     bean.ping = dayjs().valueOf() - startTime;
 
-                    // Check certificate if https is used
-                    let certInfoStartTime = dayjs().valueOf();
-                    if (this.getUrl()?.protocol === "https:") {
-                        log.debug("monitor", `[${this.name}] Check cert`);
-                        try {
-                            let tlsInfoObject = checkCertificate(res);
-                            tlsInfo = await this.updateTlsInfo(tlsInfoObject);
+                    // fallback for if kelog event is not emitted, but we may still have tlsInfo,
+                    // e.g. if the connection is made through a proxy
+                    if (this.getUrl()?.protocol === "https:" && tlsInfo.valid === undefined) {
+                        const tlsSocket = res.request.res.socket;
 
-                            if (!this.getIgnoreTls() && this.isEnabledExpiryNotification()) {
-                                log.debug("monitor", `[${this.name}] call checkCertExpiryNotifications`);
-                                await this.checkCertExpiryNotifications(tlsInfoObject);
-                            }
+                        if (tlsSocket) {
+                            tlsInfo = checkCertificate(tlsSocket);
+                            tlsInfo.valid = tlsSocket.authorized || false;
 
-                        } catch (e) {
-                            if (e.message !== "No TLS certificate in response") {
-                                log.error("monitor", "Caught error");
-                                log.error("monitor", e.message);
-                            }
+                            await this.handleTlsInfo(tlsInfo);
                         }
-                    }
-
-                    if (process.env.TIMELOGGER === "1") {
-                        log.debug("monitor", "Cert Info Query Time: " + (dayjs().valueOf() - certInfoStartTime) + "ms");
                     }
 
                     if (process.env.UPTIME_KUMA_LOG_RESPONSE_BODY_MONITOR_ID === this.id) {
@@ -558,21 +600,15 @@ class Monitor extends BeanModel {
                     } else if (this.type === "json-query") {
                         let data = res.data;
 
-                        // convert data to object
-                        if (typeof data === "string") {
-                            data = JSON.parse(data);
-                        }
+                        const { status, response } = await evaluateJsonQuery(data, this.jsonPath, this.jsonPathOperator, this.expectedValue);
 
-                        let expression = jsonata(this.jsonPath);
-
-                        let result = await expression.evaluate(data);
-
-                        if (result.toString() === this.expectedValue) {
-                            bean.msg += ", expected value is found";
+                        if (status) {
                             bean.status = UP;
+                            bean.msg = `JSON query passes (comparing ${response} ${this.jsonPathOperator} ${this.expectedValue})`;
                         } else {
-                            throw new Error(bean.msg + ", but value is not equal to expected value, value was: [" + result + "]");
+                            throw new Error(`JSON query does not pass (comparing ${response} ${this.jsonPathOperator} ${this.expectedValue})`);
                         }
+
                     }
 
                 } else if (this.type === "port") {
@@ -596,6 +632,7 @@ class Monitor extends BeanModel {
                         // If the previous beat was down or pending we use the regular
                         // beatInterval/retryInterval in the setTimeout further below
                         if (previousBeat.status !== (this.isUpsideDown() ? DOWN : UP) || msSinceLastBeat > beatInterval * 1000 + bufferTime) {
+                            bean.duration = Math.round(msSinceLastBeat / 1000);
                             throw new Error("No heartbeat in the time window");
                         } else {
                             let timeout = beatInterval * 1000 - msSinceLastBeat;
@@ -611,6 +648,7 @@ class Monitor extends BeanModel {
                             return;
                         }
                     } else {
+                        bean.duration = beatInterval;
                         throw new Error("No heartbeat in the time window");
                     }
 
@@ -628,11 +666,12 @@ class Monitor extends BeanModel {
                         headers: {
                             "Accept": "*/*",
                         },
-                        httpsAgent: CacheableDnsHttpAgent.getHttpsAgent({
+                        httpsAgent: new https.Agent({
                             maxCachedSessions: 0,      // Use Custom agent to disable session reuse (https://github.com/nodejs/node/issues/3940)
                             rejectUnauthorized: !this.getIgnoreTls(),
+                            secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
                         }),
-                        httpAgent: CacheableDnsHttpAgent.getHttpAgent({
+                        httpAgent: new http.Agent({
                             maxCachedSessions: 0,
                         }),
                         maxRedirects: this.maxredirects,
@@ -679,11 +718,12 @@ class Monitor extends BeanModel {
                         headers: {
                             "Accept": "*/*",
                         },
-                        httpsAgent: CacheableDnsHttpAgent.getHttpsAgent({
+                        httpsAgent: new https.Agent({
                             maxCachedSessions: 0,      // Use Custom agent to disable session reuse (https://github.com/nodejs/node/issues/3940)
                             rejectUnauthorized: !this.getIgnoreTls(),
+                            secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
                         }),
-                        httpAgent: CacheableDnsHttpAgent.getHttpAgent({
+                        httpAgent: new http.Agent({
                             maxCachedSessions: 0,
                         }),
                     };
@@ -698,7 +738,7 @@ class Monitor extends BeanModel {
                         options.socketPath = dockerHost._dockerDaemon;
                     } else if (dockerHost._dockerType === "tcp") {
                         options.baseURL = DockerHost.patchDockerURL(dockerHost._dockerDaemon);
-                        options.httpsAgent = CacheableDnsHttpAgent.getHttpsAgent(
+                        options.httpsAgent = new https.Agent(
                             DockerHost.getHttpsAgentOptions(dockerHost._dockerType, options.baseURL)
                         );
                     }
@@ -717,18 +757,10 @@ class Monitor extends BeanModel {
                     } else {
                         throw Error("Container State is " + res.data.State.Status);
                     }
-                } else if (this.type === "mqtt") {
-                    bean.msg = await mqttAsync(this.hostname, this.mqttTopic, this.mqttSuccessMessage, {
-                        port: this.port,
-                        username: this.mqttUsername,
-                        password: this.mqttPassword,
-                        interval: this.interval,
-                    });
-                    bean.status = UP;
                 } else if (this.type === "sqlserver") {
                     let startTime = dayjs().valueOf();
 
-                    await mssqlQuery(this.databaseConnectionString, this.databaseQuery);
+                    await mssqlQuery(this.databaseConnectionString, this.databaseQuery || "SELECT 1");
 
                     bean.msg = "";
                     bean.status = UP;
@@ -767,7 +799,7 @@ class Monitor extends BeanModel {
                 } else if (this.type === "postgres") {
                     let startTime = dayjs().valueOf();
 
-                    await postgresQuery(this.databaseConnectionString, this.databaseQuery);
+                    await postgresQuery(this.databaseConnectionString, this.databaseQuery || "SELECT 1");
 
                     bean.msg = "";
                     bean.status = UP;
@@ -775,18 +807,13 @@ class Monitor extends BeanModel {
                 } else if (this.type === "mysql") {
                     let startTime = dayjs().valueOf();
 
-                    bean.msg = await mysqlQuery(this.databaseConnectionString, this.databaseQuery);
+                    // Use `radius_password` as `password` field, since there are too many unnecessary fields
+                    // TODO: rename `radius_password` to `password` later for general use
+                    let mysqlPassword = this.radiusPassword;
+
+                    bean.msg = await mysqlQuery(this.databaseConnectionString, this.databaseQuery || "SELECT 1", mysqlPassword);
                     bean.status = UP;
                     bean.ping = dayjs().valueOf() - startTime;
-                } else if (this.type === "mongodb") {
-                    let startTime = dayjs().valueOf();
-
-                    await mongodbPing(this.databaseConnectionString);
-
-                    bean.msg = "";
-                    bean.status = UP;
-                    bean.ping = dayjs().valueOf() - startTime;
-
                 } else if (this.type === "radius") {
                     let startTime = dayjs().valueOf();
 
@@ -817,7 +844,7 @@ class Monitor extends BeanModel {
                 } else if (this.type === "redis") {
                     let startTime = dayjs().valueOf();
 
-                    bean.msg = await redisPingAsync(this.databaseConnectionString);
+                    bean.msg = await redisPingAsync(this.databaseConnectionString, !this.ignoreTls);
                     bean.status = UP;
                     bean.ping = dayjs().valueOf() - startTime;
 
@@ -863,7 +890,11 @@ class Monitor extends BeanModel {
 
             } catch (error) {
 
-                bean.msg = error.message;
+                if (error?.name === "CanceledError") {
+                    bean.msg = `timeout by AbortSignal (${this.timeout}s)`;
+                } else {
+                    bean.msg = error.message;
+                }
 
                 // If UP come in here, it must be upside down mode
                 // Just reset the retries
@@ -873,8 +904,13 @@ class Monitor extends BeanModel {
                 } else if ((this.maxretries > 0) && (retries < this.maxretries)) {
                     retries++;
                     bean.status = PENDING;
+                } else {
+                    // Continue counting retries during DOWN
+                    retries++;
                 }
             }
+
+            bean.retries = retries;
 
             log.debug("monitor", `[${this.name}] Check isImportant`);
             let isImportant = Monitor.isImportantBeat(isFirstBeat, previousBeat?.status, bean.status);
@@ -898,7 +934,7 @@ class Monitor extends BeanModel {
                 log.debug("monitor", `[${this.name}] apicache clear`);
                 apicache.clear();
 
-                UptimeKumaServer.getInstance().sendMaintenanceListByUserID(this.user_id);
+                await UptimeKumaServer.getInstance().sendMaintenanceListByUserID(this.user_id);
 
             } else {
                 bean.important = false;
@@ -1018,27 +1054,44 @@ class Monitor extends BeanModel {
             }
 
             return res;
-        } catch (e) {
+        } catch (error) {
+
+            /**
+             * Make a single attempt to obtain an new access token in the event that
+             * the recent api request failed for authentication purposes
+             */
+            if (this.auth_method === "oauth2-cc" && error.response.status === 401 && !finalCall) {
+                this.oauthAccessToken = await this.makeOidcTokenClientCredentialsRequest();
+                let oauth2AuthHeader = {
+                    "Authorization": this.oauthAccessToken.token_type + " " + this.oauthAccessToken.access_token,
+                };
+                options.headers = { ...(options.headers),
+                    ...(oauth2AuthHeader)
+                };
+
+                return this.makeAxiosRequest(options, true);
+            }
+
             // Fix #2253
             // Read more: https://stackoverflow.com/questions/1759956/curl-error-18-transfer-closed-with-outstanding-read-data-remaining
-            if (!finalCall && typeof e.message === "string" && e.message.includes("maxContentLength size of -1 exceeded")) {
+            if (!finalCall && typeof error.message === "string" && error.message.includes("maxContentLength size of -1 exceeded")) {
                 log.debug("monitor", "makeAxiosRequest with gzip");
                 options.headers["Accept-Encoding"] = "gzip, deflate";
                 return this.makeAxiosRequest(options, true);
             } else {
-                if (typeof e.message === "string" && e.message.includes("maxContentLength size of -1 exceeded")) {
-                    e.message = "response timeout: incomplete response within a interval";
+                if (typeof error.message === "string" && error.message.includes("maxContentLength size of -1 exceeded")) {
+                    error.message = "response timeout: incomplete response within a interval";
                 }
-                throw e;
+                throw error;
             }
         }
     }
 
     /**
      * Stop monitor
-     * @returns {void}
+     * @returns {Promise<void>}
      */
-    stop() {
+    async stop() {
         clearTimeout(this.heartbeatInterval);
         this.isStop = true;
 
@@ -1123,6 +1176,18 @@ class Monitor extends BeanModel {
         await R.store(tlsInfoBean);
 
         return checkCertificateResult;
+    }
+
+    /**
+     * Checks if the monitor is active based on itself and its parents
+     * @param {number} monitorID ID of monitor to send
+     * @param {boolean} active is active
+     * @returns {Promise<boolean>} Is the monitor active?
+     */
+    static async isActive(monitorID, active) {
+        const parentActive = await Monitor.isParentActive(monitorID);
+
+        return (active === 1) && parentActive;
     }
 
     /**
@@ -1261,7 +1326,10 @@ class Monitor extends BeanModel {
             for (let notification of notificationList) {
                 try {
                     const heartbeatJSON = bean.toJSON();
-
+                    const monitorData = [{ id: monitor.id,
+                        active: monitor.active
+                    }];
+                    const preloadData = await Monitor.preparePreloadData(monitorData);
                     // Prevent if the msg is undefined, notifications such as Discord cannot send out.
                     if (!heartbeatJSON["msg"]) {
                         heartbeatJSON["msg"] = "N/A";
@@ -1272,7 +1340,7 @@ class Monitor extends BeanModel {
                     heartbeatJSON["timezoneOffset"] = UptimeKumaServer.getInstance().getTimezoneOffset();
                     heartbeatJSON["localDateTime"] = dayjs.utc(heartbeatJSON["time"]).tz(heartbeatJSON["timezone"]).format(SQL_DATETIME_FORMAT);
 
-                    await Notification.send(JSON.parse(notification.config), msg, await monitor.toJSON(false), heartbeatJSON);
+                    await Notification.send(JSON.parse(notification.config), msg, monitor.toJSON(preloadData, false), heartbeatJSON);
                 } catch (e) {
                     log.error("monitor", "Cannot send notification to " + notification.name);
                     log.error("monitor", e);
@@ -1311,7 +1379,7 @@ class Monitor extends BeanModel {
             let notifyDays = await setting("tlsExpiryNotifyDays");
             if (notifyDays == null || !Array.isArray(notifyDays)) {
                 // Reset Default
-                setSetting("tlsExpiryNotifyDays", [ 7, 14, 21 ], "general");
+                await setSetting("tlsExpiryNotifyDays", [ 7, 14, 21 ], "general");
                 notifyDays = [ 7, 14, 21 ];
             }
 
@@ -1320,7 +1388,10 @@ class Monitor extends BeanModel {
                     let certInfo = tlsInfoObject.certInfo;
                     while (certInfo) {
                         let subjectCN = certInfo.subject["CN"];
-                        if (certInfo.daysRemaining > targetDays) {
+                        if (rootCertificates.has(certInfo.fingerprint256)) {
+                            log.debug("monitor", `Known root cert: ${certInfo.certType} certificate "${subjectCN}" (${certInfo.daysRemaining} days valid) on ${targetDays} deadline.`);
+                            break;
+                        } else if (certInfo.daysRemaining > targetDays) {
                             log.debug("monitor", `No need to send cert notification for ${certInfo.certType} certificate "${subjectCN}" (${certInfo.daysRemaining} days valid) on ${targetDays} deadline.`);
                         } else {
                             log.debug("monitor", `call sendCertNotificationByTargetDays for ${targetDays} deadline on certificate ${subjectCN}.`);
@@ -1386,10 +1457,7 @@ class Monitor extends BeanModel {
      * @returns {Promise<LooseObject<any>>} Previous heartbeat
      */
     static async getPreviousHeartbeat(monitorID) {
-        return await R.getRow(`
-            SELECT ping, status, time FROM heartbeat
-            WHERE id = (select MAX(id) from heartbeat where monitor_id = ?)
-        `, [
+        return await R.findOne("heartbeat", " id = (select MAX(id) from heartbeat where monitor_id = ?)", [
             monitorID
         ]);
     }
@@ -1435,6 +1503,110 @@ class Monitor extends BeanModel {
     }
 
     /**
+     * Gets monitor notification of multiple monitor
+     * @param {Array} monitorIDs IDs of monitor to get
+     * @returns {Promise<LooseObject<any>>} object
+     */
+    static async getMonitorNotification(monitorIDs) {
+        return await R.getAll(`
+            SELECT monitor_notification.monitor_id, monitor_notification.notification_id
+            FROM monitor_notification
+            WHERE monitor_notification.monitor_id IN (${monitorIDs.map((_) => "?").join(",")})
+        `, monitorIDs);
+    }
+
+    /**
+     * Gets monitor tags of multiple monitor
+     * @param {Array} monitorIDs IDs of monitor to get
+     * @returns {Promise<LooseObject<any>>} object
+     */
+    static async getMonitorTag(monitorIDs) {
+        return await R.getAll(`
+            SELECT monitor_tag.monitor_id, monitor_tag.tag_id, monitor_tag.value, tag.name, tag.color
+            FROM monitor_tag
+            JOIN tag ON monitor_tag.tag_id = tag.id
+            WHERE monitor_tag.monitor_id IN (${monitorIDs.map((_) => "?").join(",")})
+        `, monitorIDs);
+    }
+
+    /**
+     * prepare preloaded data for efficient access
+     * @param {Array} monitorData IDs & active field of monitor to get
+     * @returns {Promise<LooseObject<any>>} object
+     */
+    static async preparePreloadData(monitorData) {
+
+        const notificationsMap = new Map();
+        const tagsMap = new Map();
+        const maintenanceStatusMap = new Map();
+        const childrenIDsMap = new Map();
+        const activeStatusMap = new Map();
+        const forceInactiveMap = new Map();
+        const pathsMap = new Map();
+
+        if (monitorData.length > 0) {
+            const monitorIDs = monitorData.map(monitor => monitor.id);
+            const notifications = await Monitor.getMonitorNotification(monitorIDs);
+            const tags = await Monitor.getMonitorTag(monitorIDs);
+            const maintenanceStatuses = await Promise.all(monitorData.map(monitor => Monitor.isUnderMaintenance(monitor.id)));
+            const childrenIDs = await Promise.all(monitorData.map(monitor => Monitor.getAllChildrenIDs(monitor.id)));
+            const activeStatuses = await Promise.all(monitorData.map(monitor => Monitor.isActive(monitor.id, monitor.active)));
+            const forceInactiveStatuses = await Promise.all(monitorData.map(monitor => Monitor.isParentActive(monitor.id)));
+            const paths = await Promise.all(monitorData.map(monitor => Monitor.getAllPath(monitor.id, monitor.name)));
+
+            notifications.forEach(row => {
+                if (!notificationsMap.has(row.monitor_id)) {
+                    notificationsMap.set(row.monitor_id, {});
+                }
+                notificationsMap.get(row.monitor_id)[row.notification_id] = true;
+            });
+
+            tags.forEach(row => {
+                if (!tagsMap.has(row.monitor_id)) {
+                    tagsMap.set(row.monitor_id, []);
+                }
+                tagsMap.get(row.monitor_id).push({
+                    tag_id: row.tag_id,
+                    monitor_id: row.monitor_id,
+                    value: row.value,
+                    name: row.name,
+                    color: row.color
+                });
+            });
+
+            monitorData.forEach((monitor, index) => {
+                maintenanceStatusMap.set(monitor.id, maintenanceStatuses[index]);
+            });
+
+            monitorData.forEach((monitor, index) => {
+                childrenIDsMap.set(monitor.id, childrenIDs[index]);
+            });
+
+            monitorData.forEach((monitor, index) => {
+                activeStatusMap.set(monitor.id, activeStatuses[index]);
+            });
+
+            monitorData.forEach((monitor, index) => {
+                forceInactiveMap.set(monitor.id, !forceInactiveStatuses[index]);
+            });
+
+            monitorData.forEach((monitor, index) => {
+                pathsMap.set(monitor.id, paths[index]);
+            });
+        }
+
+        return {
+            notifications: notificationsMap,
+            tags: tagsMap,
+            maintenanceStatus: maintenanceStatusMap,
+            childrenIDs: childrenIDsMap,
+            activeStatus: activeStatusMap,
+            forceInactive: forceInactiveMap,
+            paths: pathsMap,
+        };
+    }
+
+    /**
      * Gets Parent of the monitor
      * @param {number} monitorID ID of monitor to get
      * @returns {Promise<LooseObject<any>>} Parent
@@ -1465,19 +1637,21 @@ class Monitor extends BeanModel {
     }
 
     /**
-     * Gets Full Path-Name (Groups and Name)
-     * @returns {Promise<string>} Full path name of this monitor
+     * Gets the full path
+     * @param {number} monitorID ID of the monitor to get
+     * @param {string} name of the monitor to get
+     * @returns {Promise<string[]>} Full path (includes groups and the name) of the monitor
      */
-    async getPathName() {
-        let path = this.name;
+    static async getAllPath(monitorID, name) {
+        const path = [ name ];
 
         if (this.parent === null) {
             return path;
         }
 
-        let parent = await Monitor.getParent(this.id);
+        let parent = await Monitor.getParent(monitorID);
         while (parent !== null) {
-            path = `${parent.name} / ${path}`;
+            path.unshift(parent.name);
             parent = await Monitor.getParent(parent.id);
         }
 
@@ -1507,7 +1681,7 @@ class Monitor extends BeanModel {
     }
 
     /**
-     * Unlinks all children of the the group monitor
+     * Unlinks all children of the group monitor
      * @param {number} groupID ID of group to remove children of
      * @returns {Promise<void>}
      */
@@ -1531,6 +1705,37 @@ class Monitor extends BeanModel {
 
         const parentActive = await Monitor.isParentActive(parent.id);
         return parent.active && parentActive;
+    }
+
+    /**
+     * Obtains a new Oidc Token
+     * @returns {Promise<object>} OAuthProvider client
+     */
+    async makeOidcTokenClientCredentialsRequest() {
+        log.debug("monitor", `[${this.name}] The oauth access-token undefined or expired. Requesting a new token`);
+        const oAuthAccessToken = await getOidcTokenClientCredentials(this.oauth_token_url, this.oauth_client_id, this.oauth_client_secret, this.oauth_scopes, this.oauth_auth_method);
+        if (this.oauthAccessToken?.expires_at) {
+            log.debug("monitor", `[${this.name}] Obtained oauth access-token. Expires at ${new Date(this.oauthAccessToken?.expires_at * 1000)}`);
+        } else {
+            log.debug("monitor", `[${this.name}] Obtained oauth access-token. Time until expiry was not provided`);
+        }
+
+        return oAuthAccessToken;
+    }
+
+    /**
+     * Store TLS certificate information and check for expiry
+     * @param {object} tlsInfo Information about the TLS connection
+     * @returns {Promise<void>}
+     */
+    async handleTlsInfo(tlsInfo) {
+        await this.updateTlsInfo(tlsInfo);
+        this.prometheus?.update(null, tlsInfo);
+
+        if (!this.getIgnoreTls() && this.isEnabledExpiryNotification()) {
+            log.debug("monitor", `[${this.name}] call checkCertExpiryNotifications`);
+            await this.checkCertExpiryNotifications(tlsInfo);
+        }
     }
 }
 
