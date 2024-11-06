@@ -1,7 +1,7 @@
 const childProcess = require("child_process");
 const fs = require("fs");
 
-const newVersion = process.env.RELEASE_VERSION;
+const newVersion = process.env.VERSION;
 
 if (!newVersion) {
     console.log("Missing version");

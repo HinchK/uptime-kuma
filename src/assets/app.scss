@@ -576,12 +576,6 @@ optgroup {
     outline: none !important;
 }
 
-.prism-editor__container {
-    .important {
-        font-weight: var(--bs-body-font-weight) !important;
-    }
-}
-
 h5.settings-subheading::after {
     content: "";
     display: block;
@@ -639,10 +633,6 @@ $shadow-box-padding: 20px;
     .toast-container {
         margin-bottom: 126px !important;
     }
-}
-
-.zoom-cursor {
-  cursor: zoom-in;
 }
 
 // Localization

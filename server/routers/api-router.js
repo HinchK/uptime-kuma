@@ -11,10 +11,11 @@ const { R } = require("redbean-node");
 const apicache = require("../modules/apicache");
 const Monitor = require("../model/monitor");
 const dayjs = require("dayjs");
-const { UP, MAINTENANCE, DOWN, PENDING, flipStatus, log, badgeConstants } = require("../../src/util");
+const { UP, MAINTENANCE, DOWN, PENDING, flipStatus, log } = require("../../src/util");
 const StatusPage = require("../model/status_page");
 const { UptimeKumaServer } = require("../uptime-kuma-server");
 const { makeBadge } = require("badge-maker");
+const { badgeConstants } = require("../config");
 const { Prometheus } = require("../prometheus");
 const Database = require("../database");
 const { UptimeCalculator } = require("../uptime-calculator");
@@ -44,11 +45,12 @@ router.get("/api/entry-page", async (request, response) => {
     response.json(result);
 });
 
-router.all("/api/push/:pushToken", async (request, response) => {
+router.get("/api/push/:pushToken", async (request, response) => {
     try {
+
         let pushToken = request.params.pushToken;
         let msg = request.query.msg || "OK";
-        let ping = parseFloat(request.query.ping) || null;
+        let ping = parseInt(request.query.ping) || null;
         let statusString = request.query.status || "up";
         let status = (statusString === "up") ? UP : DOWN;
 
@@ -62,57 +64,38 @@ router.all("/api/push/:pushToken", async (request, response) => {
 
         const previousHeartbeat = await Monitor.getPreviousHeartbeat(monitor.id);
 
+        if (monitor.isUpsideDown()) {
+            status = flipStatus(status);
+        }
+
         let isFirstBeat = true;
+        let previousStatus = status;
+        let duration = 0;
 
         let bean = R.dispense("heartbeat");
         bean.time = R.isoDateTimeMillis(dayjs.utc());
-        bean.monitor_id = monitor.id;
-        bean.ping = ping;
-        bean.msg = msg;
-        bean.downCount = previousHeartbeat?.downCount || 0;
 
         if (previousHeartbeat) {
             isFirstBeat = false;
-            bean.duration = dayjs(bean.time).diff(dayjs(previousHeartbeat.time), "second");
+            previousStatus = previousHeartbeat.status;
+            duration = dayjs(bean.time).diff(dayjs(previousHeartbeat.time), "second");
         }
 
         if (await Monitor.isUnderMaintenance(monitor.id)) {
             msg = "Monitor under maintenance";
-            bean.status = MAINTENANCE;
-        } else {
-            determineStatus(status, previousHeartbeat, monitor.maxretries, monitor.isUpsideDown(), bean);
+            status = MAINTENANCE;
         }
-
-        // Calculate uptime
-        let uptimeCalculator = await UptimeCalculator.getUptimeCalculator(monitor.id);
-        let endTimeDayjs = await uptimeCalculator.update(bean.status, parseFloat(bean.ping));
-        bean.end_time = R.isoDateTimeMillis(endTimeDayjs);
 
         log.debug("router", `/api/push/ called at ${dayjs().format("YYYY-MM-DD HH:mm:ss.SSS")}`);
-        log.debug("router", "PreviousStatus: " + previousHeartbeat?.status);
-        log.debug("router", "Current Status: " + bean.status);
+        log.debug("router", "PreviousStatus: " + previousStatus);
+        log.debug("router", "Current Status: " + status);
 
-        bean.important = Monitor.isImportantBeat(isFirstBeat, previousHeartbeat?.status, status);
-
-        if (Monitor.isImportantForNotification(isFirstBeat, previousHeartbeat?.status, status)) {
-            // Reset down count
-            bean.downCount = 0;
-
-            log.debug("monitor", `[${this.name}] sendNotification`);
-            await Monitor.sendNotification(isFirstBeat, monitor, bean);
-        } else {
-            if (bean.status === DOWN && this.resendInterval > 0) {
-                ++bean.downCount;
-                if (bean.downCount >= this.resendInterval) {
-                    // Send notification again, because we are still DOWN
-                    log.debug("monitor", `[${this.name}] sendNotification again: Down Count: ${bean.downCount} | Resend Interval: ${this.resendInterval}`);
-                    await Monitor.sendNotification(isFirstBeat, this, bean);
-
-                    // Reset down count
-                    bean.downCount = 0;
-                }
-            }
-        }
+        bean.important = Monitor.isImportantBeat(isFirstBeat, previousStatus, status);
+        bean.monitor_id = monitor.id;
+        bean.status = status;
+        bean.msg = msg;
+        bean.ping = ping;
+        bean.duration = duration;
 
         await R.store(bean);
 
@@ -124,6 +107,11 @@ router.all("/api/push/:pushToken", async (request, response) => {
         response.json({
             ok: true,
         });
+
+        if (Monitor.isImportantForNotification(isFirstBeat, previousStatus, status)) {
+            await Monitor.sendNotification(isFirstBeat, monitor, bean);
+        }
+
     } catch (e) {
         response.status(404).json({
             ok: false,
@@ -232,8 +220,8 @@ router.get("/api/badge/:id/uptime/:duration?", cache("5 minutes"), async (reques
         let requestedDuration = request.params.duration !== undefined ? request.params.duration : "24h";
         const overrideValue = value && parseFloat(value);
 
-        if (/^[0-9]+$/.test(requestedDuration)) {
-            requestedDuration = `${requestedDuration}h`;
+        if (requestedDuration === "24") {
+            requestedDuration = "24h";
         }
 
         let publicMonitor = await R.getRow(`
@@ -265,7 +253,7 @@ router.get("/api/badge/:id/uptime/:duration?", cache("5 minutes"), async (reques
             // build a label string. If a custom label is given, override the default one (requestedDuration)
             badgeValues.label = filterAndJoin([
                 labelPrefix,
-                label ?? `Uptime (${requestedDuration.slice(0, -1)}${labelSuffix})`,
+                label ?? `Uptime (${requestedDuration}${labelSuffix})`,
             ]);
             badgeValues.message = filterAndJoin([ prefix, cleanUptime, suffix ]);
         }
@@ -302,8 +290,8 @@ router.get("/api/badge/:id/ping/:duration?", cache("5 minutes"), async (request,
         let requestedDuration = request.params.duration !== undefined ? request.params.duration : "24h";
         const overrideValue = value && parseFloat(value);
 
-        if (/^[0-9]+$/.test(requestedDuration)) {
-            requestedDuration = `${requestedDuration}h`;
+        if (requestedDuration === "24") {
+            requestedDuration = "24h";
         }
 
         // Check if monitor is public
@@ -325,7 +313,7 @@ router.get("/api/badge/:id/ping/:duration?", cache("5 minutes"), async (request,
             // use a given, custom labelColor or use the default badge label color (defined by badge-maker)
             badgeValues.labelColor = labelColor ?? "";
             // build a lable string. If a custom label is given, override the default one (requestedDuration)
-            badgeValues.label = filterAndJoin([ labelPrefix, label ?? `Avg. Ping (${requestedDuration.slice(0, -1)}${labelSuffix})` ]);
+            badgeValues.label = filterAndJoin([ labelPrefix, label ?? `Avg. Ping (${requestedDuration}${labelSuffix})` ]);
             badgeValues.message = filterAndJoin([ prefix, avgPing, suffix ]);
         }
 
@@ -573,59 +561,5 @@ router.get("/api/badge/:id/response", cache("5 minutes"), async (request, respon
         sendHttpError(response, error.message);
     }
 });
-
-/**
- * Determines the status of the next beat in the push route handling.
- * @param {string} status - The reported new status.
- * @param {object} previousHeartbeat - The previous heartbeat object.
- * @param {number} maxretries - The maximum number of retries allowed.
- * @param {boolean} isUpsideDown - Indicates if the monitor is upside down.
- * @param {object} bean - The new heartbeat object.
- * @returns {void}
- */
-function determineStatus(status, previousHeartbeat, maxretries, isUpsideDown, bean) {
-    if (isUpsideDown) {
-        status = flipStatus(status);
-    }
-
-    if (previousHeartbeat) {
-        if (previousHeartbeat.status === UP && status === DOWN) {
-            // Going Down
-            if ((maxretries > 0) && (previousHeartbeat.retries < maxretries)) {
-                // Retries available
-                bean.retries = previousHeartbeat.retries + 1;
-                bean.status = PENDING;
-            } else {
-                // No more retries
-                bean.retries = 0;
-                bean.status = DOWN;
-            }
-        } else if (previousHeartbeat.status === PENDING && status === DOWN && previousHeartbeat.retries < maxretries) {
-            // Retries available
-            bean.retries = previousHeartbeat.retries + 1;
-            bean.status = PENDING;
-        } else {
-            // No more retries or not pending
-            if (status === DOWN) {
-                bean.retries = previousHeartbeat.retries + 1;
-                bean.status = status;
-            } else {
-                bean.retries = 0;
-                bean.status = status;
-            }
-        }
-    } else {
-        // First beat?
-        if (status === DOWN && maxretries > 0) {
-            // Retries available
-            bean.retries = 1;
-            bean.status = PENDING;
-        } else {
-            // Retires not enabled
-            bean.retries = 0;
-            bean.status = status;
-        }
-    }
-}
 
 module.exports = router;

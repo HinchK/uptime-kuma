@@ -8,12 +8,7 @@ const path = require("path");
 const Database = require("../database");
 const jwt = require("jsonwebtoken");
 const config = require("../config");
-const { RemoteBrowser } = require("../remote-browser");
 
-/**
- * Cached instance of a browser
- * @type {import ("playwright-core").Browser}
- */
 let browser = null;
 
 let allowedList = [];
@@ -48,7 +43,6 @@ if (process.platform === "win32") {
         "/usr/bin/chromium",
         "/usr/bin/chromium-browser",
         "/usr/bin/google-chrome",
-        "/snap/bin/chromium",           // Ubuntu
     ];
 } else if (process.platform === "darwin") {
     allowedList = [
@@ -75,12 +69,10 @@ async function isAllowedChromeExecutable(executablePath) {
 /**
  * Get the current instance of the browser. If there isn't one, create
  * it.
- * @returns {Promise<import ("playwright-core").Browser>} The browser
+ * @returns {Promise<Browser>} The browser
  */
 async function getBrowser() {
-    if (browser && browser.isConnected()) {
-        return browser;
-    } else {
+    if (!browser) {
         let executablePath = await Settings.get("chromeExecutable");
 
         executablePath = await prepareChromeExecutable(executablePath);
@@ -89,21 +81,7 @@ async function getBrowser() {
             //headless: false,
             executablePath,
         });
-
-        return browser;
     }
-}
-
-/**
- * Get the current instance of the browser. If there isn't one, create it
- * @param {integer} remoteBrowserID Path to executable
- * @param {integer} userId User ID
- * @returns {Promise<Browser>} The browser
- */
-async function getRemoteBrowser(remoteBrowserID, userId) {
-    let remoteBrowser = await RemoteBrowser.get(remoteBrowserID, userId);
-    log.debug("MONITOR", `Using remote browser: ${remoteBrowser.name} (${remoteBrowser.id})`);
-    browser = await chromium.connect(remoteBrowser.url);
     return browser;
 }
 
@@ -213,21 +191,11 @@ async function testChrome(executablePath) {
         throw new Error(e.message);
     }
 }
-// test remote browser
+
 /**
- * @param {string} remoteBrowserURL Remote Browser URL
- * @returns {Promise<boolean>} Returns if connection worked
+ * TODO: connect remote browser? https://playwright.dev/docs/api/class-browsertype#browser-type-connect
+ *
  */
-async function testRemoteBrowser(remoteBrowserURL) {
-    try {
-        const browser = await chromium.connect(remoteBrowserURL);
-        browser.version();
-        await browser.close();
-        return true;
-    } catch (e) {
-        throw new Error(e.message);
-    }
-}
 class RealBrowserMonitorType extends MonitorType {
 
     name = "real-browser";
@@ -236,7 +204,7 @@ class RealBrowserMonitorType extends MonitorType {
      * @inheritdoc
      */
     async check(monitor, heartbeat, server) {
-        const browser = monitor.remote_browser ? await getRemoteBrowser(monitor.remote_browser, monitor.user_id) : await getBrowser();
+        const browser = await getBrowser();
         const context = await browser.newContext();
         const page = await context.newPage();
 
@@ -269,5 +237,4 @@ module.exports = {
     RealBrowserMonitorType,
     testChrome,
     resetChrome,
-    testRemoteBrowser,
 };

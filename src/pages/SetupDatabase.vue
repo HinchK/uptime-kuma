@@ -11,7 +11,7 @@
             <div v-if="info.runningSetup" class="mt-5">
                 <div class="alert alert-success mx-3 px-4" role="alert">
                     <div class="d-flex align-items-center">
-                        <strong>{{ $t("settingUpDatabaseMSG") }}</strong>
+                        <strong>Setting up the database. It may take a while, please be patient.</strong>
                         <div class="ms-3 pt-1">
                             <div class="spinner-border" role="status" aria-hidden="true"></div>
                         </div>

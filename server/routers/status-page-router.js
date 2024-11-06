@@ -4,7 +4,7 @@ const { UptimeKumaServer } = require("../uptime-kuma-server");
 const StatusPage = require("../model/status_page");
 const { allowDevAllOrigin, sendHttpError } = require("../util-server");
 const { R } = require("redbean-node");
-const { badgeConstants } = require("../../src/util");
+const { badgeConstants } = require("../config");
 const { makeBadge } = require("badge-maker");
 const { UptimeCalculator } = require("../uptime-calculator");
 
@@ -16,11 +16,6 @@ const server = UptimeKumaServer.getInstance();
 router.get("/status/:slug", cache("5 minutes"), async (request, response) => {
     let slug = request.params.slug;
     await StatusPage.handleStatusPageResponse(response, server.indexHTML, slug);
-});
-
-router.get("/status/:slug/rss", cache("5 minutes"), async (request, response) => {
-    let slug = request.params.slug;
-    await StatusPage.handleStatusPageRSSResponse(response, slug);
 });
 
 router.get("/status", cache("5 minutes"), async (request, response) => {
@@ -45,11 +40,15 @@ router.get("/api/status-page/:slug", cache("5 minutes"), async (request, respons
         ]);
 
         if (!statusPage) {
-            sendHttpError(response, "Status Page Not Found");
             return null;
         }
 
         let statusPageData = await StatusPage.getStatusPageData(statusPage);
+
+        if (!statusPageData) {
+            sendHttpError(response, "Not Found");
+            return;
+        }
 
         // Response
         response.json(statusPageData);

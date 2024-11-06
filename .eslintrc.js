@@ -1,7 +1,8 @@
 module.exports = {
     ignorePatterns: [
         "test/*.js",
-        "server/modules/*",
+        "test/cypress",
+        "server/modules/apicache/*",
         "src/util.js"
     ],
     root: true,
@@ -83,7 +84,7 @@ module.exports = {
             "checkLoops": false,
         }],
         "space-before-blocks": "warn",
-        //"no-console": "warn",
+        //'no-console': 'warn',
         "no-extra-boolean-cast": "off",
         "no-multiple-empty-lines": [ "warn", {
             "max": 1,
@@ -95,8 +96,7 @@ module.exports = {
         "no-unneeded-ternary": "error",
         "array-bracket-newline": [ "error", "consistent" ],
         "eol-last": [ "error", "always" ],
-        //"prefer-template": "error",
-        "template-curly-spacing": [ "warn", "never" ],
+        //'prefer-template': 'error',
         "comma-dangle": [ "warn", "only-multiline" ],
         "no-empty": [ "error", {
             "allowEmptyCatch": true
@@ -147,6 +147,23 @@ module.exports = {
             "rules": {
                 "comma-dangle": [ "error", "always-multiline" ],
             }
+        },
+
+        // Override for jest puppeteer
+        {
+            "files": [
+                "**/*.spec.js",
+                "**/*.spec.jsx"
+            ],
+            env: {
+                jest: true,
+            },
+            globals: {
+                page: true,
+                browser: true,
+                context: true,
+                jestPuppeteer: true,
+            },
         },
 
         // Override for TypeScript

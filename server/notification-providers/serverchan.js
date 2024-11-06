@@ -3,22 +3,16 @@ const axios = require("axios");
 const { DOWN, UP } = require("../../src/util");
 
 class ServerChan extends NotificationProvider {
+
     name = "ServerChan";
 
     /**
      * @inheritdoc
      */
     async send(notification, msg, monitorJSON = null, heartbeatJSON = null) {
-        const okMsg = "Sent Successfully.";
-
-        // serverchan3 requires sending via ft07.com
-        const matchResult = String(notification.serverChanSendKey).match(/^sctp(\d+)t/i);
-        const url = matchResult && matchResult[1]
-            ? `https://${matchResult[1]}.push.ft07.com/send/${notification.serverChanSendKey}.send`
-            : `https://sctapi.ftqq.com/${notification.serverChanSendKey}.send`;
-
+        let okMsg = "Sent Successfully.";
         try {
-            await axios.post(url, {
+            await axios.post(`https://sctapi.ftqq.com/${notification.serverChanSendKey}.send`, {
                 "title": this.checkStatus(heartbeatJSON, monitorJSON),
                 "desp": msg,
             });

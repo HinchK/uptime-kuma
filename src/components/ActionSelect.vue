@@ -1,11 +1,11 @@
 <template>
     <div class="input-group mb-3">
-        <select :id="id" ref="select" v-model="model" class="form-select" :disabled="disabled" :required="required">
+        <select ref="select" v-model="model" class="form-select" :disabled="disabled" :required="required">
             <option v-for="option in options" :key="option" :value="option.value" :disabled="option.disabled">{{ option.label }}</option>
         </select>
-        <button type="button" class="btn btn-outline-primary" :class="{ disabled: actionDisabled }" :aria-label="actionAriaLabel" @click="action()">
-            <font-awesome-icon :icon="icon" aria-hidden="true" />
-        </button>
+        <a class="btn btn-outline-primary" :class="{ disabled: actionDisabled }" @click="action()">
+            <font-awesome-icon :icon="icon" />
+        </a>
     </div>
 </template>
 
@@ -19,13 +19,6 @@ export default {
         options: {
             type: Array,
             default: () => [],
-        },
-        /**
-         * The id of the form which will be targeted by a <label for=..
-         */
-        id: {
-            type: String,
-            required: true,
         },
         /**
          * The value of the select field.
@@ -57,13 +50,6 @@ export default {
         action: {
             type: Function,
             default: () => {},
-        },
-        /**
-         * The aria-label of the action button
-         */
-        actionAriaLabel: {
-            type: String,
-            required: true,
         },
         /**
          * Whether the action button is disabled.

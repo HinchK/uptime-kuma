@@ -9,30 +9,15 @@
                 <div class="row">
                     <div class="col">
                         <h3>{{ $t("Up") }}</h3>
-                        <span
-                            class="num"
-                            :class="$root.stats.up === 0 && 'text-secondary'"
-                        >
-                            {{ $root.stats.up }}
-                        </span>
+                        <span class="num">{{ $root.stats.up }}</span>
                     </div>
                     <div class="col">
                         <h3>{{ $t("Down") }}</h3>
-                        <span
-                            class="num"
-                            :class="$root.stats.down > 0 ? 'text-danger' : 'text-secondary'"
-                        >
-                            {{ $root.stats.down }}
-                        </span>
+                        <span class="num text-danger">{{ $root.stats.down }}</span>
                     </div>
                     <div class="col">
                         <h3>{{ $t("Maintenance") }}</h3>
-                        <span
-                            class="num"
-                            :class="$root.stats.maintenance > 0 ? 'text-maintenance' : 'text-secondary'"
-                        >
-                            {{ $root.stats.maintenance }}
-                        </span>
+                        <span class="num text-maintenance">{{ $root.stats.maintenance }}</span>
                     </div>
                     <div class="col">
                         <h3>{{ $t("Unknown") }}</h3>
@@ -57,7 +42,7 @@
                     </thead>
                     <tbody>
                         <tr v-for="(beat, index) in displayedRecords" :key="index" :class="{ 'shadow-box': $root.windowWidth <= 550}">
-                            <td class="name-column"><router-link :to="`/dashboard/${beat.monitorID}`">{{ $root.monitorList[beat.monitorID]?.name }}</router-link></td>
+                            <td><router-link :to="`/dashboard/${beat.monitorID}`">{{ $root.monitorList[beat.monitorID]?.name }}</router-link></td>
                             <td><Status :status="beat.status" /></td>
                             <td :class="{ 'border-0':! beat.msg}"><Datetime :value="beat.time" /></td>
                             <td class="border-0">{{ beat.msg }}</td>
@@ -231,18 +216,6 @@ table {
     @media (max-width: 550px) {
         table-layout: fixed;
         overflow-wrap: break-word;
-    }
-}
-
-@media screen and (max-width: 1280px) {
-    .name-column {
-        min-width: 150px;
-    }
-}
-
-@media screen and (min-aspect-ratio: 4/3) {
-    .name-column {
-        min-width: 200px;
     }
 }
 </style>

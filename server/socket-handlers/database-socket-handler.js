@@ -6,7 +6,7 @@ const Database = require("../database");
  * @param {Socket} socket Socket.io instance
  * @returns {void}
  */
-module.exports.databaseSocketHandler = (socket) => {
+module.exports = (socket) => {
 
     // Post or edit incident
     socket.on("getDatabaseSize", async (callback) => {
@@ -27,7 +27,7 @@ module.exports.databaseSocketHandler = (socket) => {
     socket.on("shrinkDatabase", async (callback) => {
         try {
             checkLogin(socket);
-            await Database.shrink();
+            Database.shrink();
             callback({
                 ok: true,
             });

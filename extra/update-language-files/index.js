@@ -2,6 +2,7 @@
 
 import fs from "fs";
 import util from "util";
+import rmSync from "../fs-rmSync.js";
 
 /**
  * Copy across the required language files
@@ -15,10 +16,7 @@ import util from "util";
  */
 function copyFiles(langCode, baseLang) {
     if (fs.existsSync("./languages")) {
-        fs.rmSync("./languages", {
-            recursive: true,
-            force: true,
-        });
+        rmSync("./languages", { recursive: true });
     }
     fs.mkdirSync("./languages");
 
@@ -95,9 +93,6 @@ console.log("Updating: " + langCode);
 
 copyFiles(langCode, baseLangCode);
 await updateLanguage(langCode, baseLangCode);
-fs.rmSync("./languages", {
-    recursive: true,
-    force: true,
-});
+rmSync("./languages", { recursive: true });
 
 console.log("Done. Fixing formatting by ESLint...");
